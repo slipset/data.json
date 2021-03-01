@@ -66,100 +66,49 @@
 
 (set! *warn-on-reflection* true)
 
-
-
 (definterface IFoo
-  (^Long setPos [^long newPos])
-  (^Long pos []))
-
-(deftype StringStream [^{:unsynchronized-mutable true :tag long} i buffer]
-  IFoo
-  (setPos [_ new-pos]
-    (set! i new-pos))
-  (pos [_]
-   (Long. i)))
-
-(defn- load-more
-  ([stream p])
-  ([stream p needed]))
-
-(defmacro safe-aget [stream buffer i]
-  (let [tagged-buffer (vary-meta buffer assoc :tag "[C")]
-    `(do (load-more ~stream (Long. (long ~i)))
-         (int (aget ~tagged-buffer ~i)))))
-
-(defn- read-hex-char [^StringStream stream i]
+  (^int nextChar [])
+  (string [])
+  (number [bigdec])
+  (unread []))
+(defn- read-hex-char [^IFoo stream]
   ;; Expects to be called with the head of the stream AFTER the
   ;; initial "\u".  Reads the next four characters from the stream.
-  (load-more stream i 4)
-  (let [buffer ^chars (.buffer stream)
-        s (String. buffer (int i) 4)]
+  (let [s (str (.nextChar stream)
+               (.nextChar stream)
+               (.nextChar stream)
+               (.nextChar stream))]
     (char (Integer/parseInt s 16))))
 
-(defn- read-escaped-char [^StringStream stream pos]
+(defn- read-escaped-char [^IFoo stream]
   ;; Expects to be called with the head of the stream AFTER the
   ;; initial backslash.
-  (load-more pos 1)
-  (let [buffer ^chars (.buffer stream)
-        c (safe-aget stream buffer pos)]
+  (let [
+        c (.nextChar stream)]
     (codepoint-case (int c)
-      (\" \\ \/) (do
-                   (.setPos stream (inc pos))
-                   (char c))
-      \b (do
-           (.setPos stream (inc pos))
-           \backspace)
-      \f (do
-           (.setPos stream (inc pos))
-           \formfeed)
-      \n (do
-           (.setPos stream (inc pos))
-           \newline)
-      \r (do
-           (.setPos stream (inc pos))
-           \return)
-      \t (do
-           (.setPos stream (inc pos))
-           \tab)
+      (\" \\ \/) (char c)
+      \b \backspace
+      \f \formfeed
+      \n \newline
+      \r \return
+      \t \tab
       \u (do
-           (.setPos stream (+ pos 5))
-           (read-hex-char stream (inc pos))))))
+           (read-hex-char stream)))))
 
-(defn- slow-read-string [^StringStream stream p i]
-  (.setPos stream i)
-  (let [buffer ^chars (.buffer stream)
-        cnt (dec (- i p))
-        builder (doto (StringBuilder.)
-                  (.append buffer (int (inc p)) (int (+ p cnt))))]
-    (loop [j (.pos stream)]
-      (let [c (safe-aget stream buffer j)]
+(defn- slow-read-string [^IFoo stream ^String so-far]
+  (let [builder (StringBuilder. so-far)]
+    (loop []
+      (let [c (.nextChar stream)]
         (cond
           (= (codepoint \") c)
-          (do (.setPos stream (inc i))
-              (str builder))
+          (str builder)
 
           (= (codepoint \\) c)
-          (do (.append builder (read-escaped-char stream (inc j)))
-              (recur (.pos stream)))
-
+          (do (.append builder (read-escaped-char stream))
+              (recur))
           :else
           (do (.append builder (char c))
-              (.setPos stream (inc j))
-              (recur (.pos stream))))))))
-
-(defn- read-quoted-string [^StringStream stream ^long pos]
-  ;; Expects to be called with the head of the stream AT the
-  ;; opening quotation mark.
-  (let [pos' (unchecked-inc pos)
-        buffer ^chars (.buffer stream)]
-    (loop [i pos']
-      (let [c (safe-aget stream buffer i)]
-        (codepoint-case c
-          \" (do
-               (.setPos stream (Long. (unchecked-add 2 (unchecked-dec i))))
-               (String. buffer pos' (unchecked-subtract i pos')))
-          \\ (slow-read-string stream pos i)
-          (recur (unchecked-inc i)))))))
+              (recur)))))))
 
 (defn- read-integer [^String string]
   (if (< (count string) 18)  ; definitely fits in a Long
@@ -173,155 +122,179 @@
     (bigdec string)
     (Double/valueOf string)))
 
-(defn- read-number [^StringStream stream pos bigdec]
-  (let [buffer ^chars (.buffer stream)]
-    (loop [i pos
-           decimal? false]
-      (let [c (safe-aget stream buffer i)]
-        (codepoint-case (int c)
+(deftype StringStream [^{:unsynchronized-mutable true :tag long} i
+                       ^long buff-size
+                       ^chars buffer]
+  IFoo
+  (unread [_]
+    (set! i (unchecked-dec i)))
+  (nextChar [_]
+    (let [c (aget buffer i)]
+      (set! i (unchecked-inc i))
+      (int c)))
+  (string [this]
+    ;; Expects to be called with the head of the stream AT the
+    ;; opening quotation mark.
+    (let [i' i]
+      (loop [j i]
+        (let [c (aget buffer j)]
+          (if (= \" c)
+            (do
+              (set! i (unchecked-inc j))
+              (String. buffer i' (unchecked-subtract j i')))
+            (if (= \\ c)
+              (do
+                (set! i j)
+                (slow-read-string this (String. buffer i' (unchecked-subtract j i'))))
+              (recur (unchecked-inc j))))))))
+
+  (number [this bigdec]
+    (set! i (unchecked-dec i))
+    (loop [decimal? false]
+      (let [c (.nextChar this)]
+        (codepoint-case c
           (\- \+ \0 \1 \2 \3 \4 \5 \6 \7 \8 \9)
-          (recur (unchecked-inc i)
-                 decimal?)
+          (if (= i buff-size)
+            9
+            (recur decimal?))
           (\e \E \.)
-          (recur (unchecked-inc i)
-                 true)
-          (do (.setPos stream i)
+          (recur true)
+          (do (set! i (unchecked-dec i))
               9
               #_            (let [s (String. (java.util.Arrays/copyOf ^bytes buffer i))]
                               (if decimal?
                                 (read-decimal s bigdec)
-                                (read-integer s)))))))))
+                                n(read-integer s)))))))))
 
+(defn- read-null [^StringStream stream]
+  (if (= (codepoint \u) (.nextChar stream))
+    (if (= (codepoint \l) (.nextChar stream))
+      (if (= (codepoint \l) (.nextChar stream))
+        nil
+        (throw (Exception. "Expected null, got nul")))
+      (throw (Exception. "Expected null, got nu")))
+    (throw (Exception. "Expected null, got n"))))
 
-(defn- read-null [^StringStream stream ^long pos]
-  (let [buffer (.buffer stream)]
-    (when-not (and (= (codepoint \u) (safe-aget stream buffer (unchecked-add pos 1)))
-                   (= (codepoint \l) (safe-aget stream buffer (unchecked-add pos 2)))
-                   (= (codepoint \l) (safe-aget stream buffer (unchecked-add pos 3))))
-      (throw (Exception. "Expected null")))))
+(defn- read-true [^StringStream stream]
+  (if (= (codepoint \r) (.nextChar stream))
+    (if (= (codepoint \u) (.nextChar stream))
+      (if (= (codepoint \e) (.nextChar stream))
+        true
+        (throw (Exception. "Expected true, got tru")))
+      (throw (Exception. "Expected tr")))
+    (throw (Exception. "Expected t"))))
 
-(defn- read-true [^StringStream stream ^long pos]
-  (let [buffer (.buffer stream)]
-    (when-not (and (= (codepoint \r) (safe-aget stream buffer (unchecked-add pos 1)))
-                   (= (codepoint \u) (safe-aget stream buffer (unchecked-add pos 2)))
-                   (= (codepoint \e) (safe-aget stream buffer (unchecked-add pos 3))))
-      (throw (Exception. "Expected true")))))
+(defn- read-false [^StringStream stream]
+  (if (= (codepoint \a) (.nextChar stream))
+    (if (= (codepoint \l) (.nextChar stream))
+      (if (= (codepoint \s) (.nextChar stream))
+        (if (= (codepoint \e) (.nextChar stream))
+          false
+          (throw (Exception. "Expected false, got fals")))
+        (throw (Exception. "Expected false, got fal")))
+      (throw (Exception. "Expected false, got fa")))
+    (throw (Exception. "Expected false, got f")))
+  )
 
-(defn- read-false [^StringStream stream ^long pos]
-  (let [buffer (.buffer stream)]
-    (when-not (and (= (codepoint \a) (safe-aget stream buffer (unchecked-add pos 1)))
-                   (= (codepoint \l) (safe-aget stream buffer (unchecked-add pos 2)))
-                   (= (codepoint \s) (safe-aget stream buffer (unchecked-add pos 3)))
-                   (= (codepoint \e) (safe-aget stream buffer (unchecked-add pos 4))))
-      (throw (Exception. "Expected false")))))
-
-(defn- read-key [^StringStream stream  ^long p]
-  (let [buffer ^chars (.buffer stream)]
-    (loop [i (unchecked-inc p)]
-      (let [c (safe-aget stream buffer i)]
-        (if (> c (codepoint \ ))
-          (if (= c (codepoint \"))
-            (let [s (read-quoted-string stream i)]
-              (loop [j (long (.pos stream))]
-                (let [c (safe-aget stream buffer j)]
-                  (if (> c (codepoint \ ))
-                    (if (= c (codepoint \:))
-                      (do
-                        (.setPos stream (unchecked-inc j))
-                        s)
-                      (throw (Exception. "Missing colon in object")))
-                    (recur (unchecked-inc j))))))
-            (throw (Exception. "Missing key in object")))
-          (recur (unchecked-inc i)))))))
+(defn- read-key [^StringStream stream]
+  (loop []
+    (let [c (.nextChar stream)]
+      (if (> c (codepoint \ ))
+        (if (= c (codepoint \"))
+          (let [s (.string stream)]
+            (loop []
+              (let [c (.nextChar stream)]
+                (if (> c (codepoint \ ))
+                  (if (= c (codepoint \:))
+                    (do s)
+                    (throw (Exception. "Missing colon in object")))
+                  (recur)))))
+          (throw (Exception. "Missing key in object")))
+        (recur)))))
 
 (require '[clj-java-decompiler.core :refer [decompile]])
-(int \,)
 
-(defrecord Frame [^boolean type value ^String key])
+(defprotocol IFrame
+  (swap-key [_ k])
+  (get-key [_]))
+
+(deftype Frame [^boolean type value ^{:tag String
+                                      :unsynchronized-mutable true} key]
+  IFrame
+  (swap-key [_ k]
+    (let [old key]
+      (set! key k)
+      old))
+  (get-key [_]
+    key))
+
 
 (defn -read [^StringStream stream eof-error? eof-value bigdec key-fn value-fn]
-  (let [buffer ^chars (.buffer stream)]
-    (loop [i 0
-           value nil
-           stack (LinkedList.)
-           current-frame nil]
-      (let [c (safe-aget stream buffer i)]
-        (if (> c (codepoint \ ))
-          (codepoint-case c
-            (\- \0 \1 \2 \3 \4 \5 \6 \7 \8 \9)
-            (let [n (read-number stream i bigdec)]
-              (if current-frame
-                (recur (long (.pos stream))
-                       n
-                       stack
-                       current-frame)
-                n))
-            \n (do (read-null stream i)
-                   (if (not (nil?  current-frame)) ;; \f
-                     (recur (unchecked-add i 4)
-                            nil
-                            stack
-                            current-frame)
-                     nil))
-            \f (do (read-false stream i)
-                   (if (not (nil?  current-frame)) ;; \f
-                     (recur (unchecked-add i 5)
-                            false
-                            stack
-                            current-frame)
-                     false))
-            \t (do (read-true stream i)
-                   (if (not (nil?  current-frame)) ;;\t
-                     (recur (unchecked-add i 4)
-                            true
-                            stack
-                            current-frame)
-                     true))
-            \" (let [s (read-quoted-string stream i)]
-                 (if (not (nil? current-frame))
-                   (recur (long (.pos stream))
-                          s
+  (loop [value nil stack (LinkedList.) current-frame nil]
+    (let [c (.nextChar stream)]
+      (if (> c (codepoint \ ))
+        (codepoint-case c
+          (\- \0 \1 \2 \3 \4 \5 \6 \7 \8 \9)
+          (let [n (.number stream bigdec)]
+            (if (not (.isEmpty stack))
+              (recur n stack current-frame)
+              n))
+          \n (do (read-null stream)
+                 (if (not (.isEmpty stack)) ;; \f
+                   (recur nil stack current-frame)
+                   nil))
+          \f (do (read-false stream)
+                 (if (not (.isEmpty stack)) ;; \f
+                   (recur false stack current-frame)
+                   false))
+          \t (do (read-true stream)
+                 (if (not (.isEmpty stack)) ;;\t
+                   (recur true stack current-frame)
+                   true))
+          \" (let [s (.string stream)]
+               (if (not (.isEmpty stack))
+                 (recur s stack current-frame)
+                 s))
+          \, (let [t (.type ^Frame current-frame)
+                   v (.value ^Frame current-frame)]
+               (if t
+                 (do
+                   (conj! v value)
+                   (recur nil
                           stack
-                          current-frame)
-                   s))
-            \, (let [t (.type ^Frame current-frame)
-                     v (.value ^Frame  current-frame)]
-                 (if t
-                   (do
-                     (conj! v value)
-                     (recur (unchecked-inc i)
-                            nil
-                            stack
-                            current-frame))
-                   (let [k (.key ^Frame current-frame)
-                         new-key ^String (read-key stream i)]
-                     (assoc! v k value)
-                     (recur (long (.pos stream))
-                            nil
-                            stack
-                            (assoc current-frame :key new-key)))))
-            ;; Read JSON arrays
-            \[ (recur (unchecked-inc i) ;; \[
-                      nil
-                      (doto stack (.addFirst (Frame. true (transient []) nil)))
+                          current-frame))
+                 (let [k (.swap-key ^Frame current-frame (read-key stream))]
 
-                      (.getFirst stack))
-            \] (let [f ^Frame (.pollFirst stack) ;; \]
-                     v (.value ^Frame f)]
-                 (conj! v value)
-                 (if (.isEmpty stack)
-                   (persistent! v)
-                   (recur (unchecked-inc i)
-                          (persistent! v)
+                   (assoc! v k value)
+                   (recur nil
                           stack
-                          (.getFirst stack ))))
-            \{ (let [k ^String (read-key stream i)] ;; \{
-                 (recur
-                  (long (.pos stream))
-                  nil
-                  (doto stack (.addFirst (Frame. false (transient {}) k)))
-                  (.getFirst stack)))
-            \} (let [f ^Frame (.pollFirst stack)
+                          current-frame))))
+          ;; Read JSON arrays
+          \[ (let [f (Frame. true (transient []) nil)]
+               (.addFirst stack f)
+               (recur nil stack f))
+          \] (let [f ^Frame (.pollFirst stack) ;; \]
+                   v (.value ^Frame f)]
+               (conj! v value)
+               (if (.isEmpty stack)
+                 (persistent! v)
+                 (recur (persistent! v) stack (.getFirst stack))))
+          \{ (let [k ^String (read-key stream)
+                   f (Frame. false (transient {}) k)]
+               (.addFirst stack f)
+               (recur nil stack f))
+          \} (let [f ^Frame (.pollFirst stack)
+                   v (.value ^Frame f)]
+               (assoc! v (.get-key ^Frame f) value)
+               (if (.isEmpty stack)
+                 (persistent! v)
+                 (recur (persistent! v) stack (.getFirst stack))))
+
+          (throw (Exception.
+                  (str "JSON error (unexpected character): `" (char c) "`" (.string stream)))))
+        (recur value stack current-frame)))))
+
+#_(let [f ^Frame (.pollFirst stack)
                      v (.value ^Frame f)]
                  (assoc! v (.key ^Frame  f) value)
                  (if (.isEmpty stack)
@@ -331,15 +304,8 @@
                           stack
                           (.getFirst stack))))
 
-            (throw (Exception.
-                    (str "JSON error (unexpected character): " #_(char-at stream  i)))))
-          (recur (unchecked-inc i)
-                 value
-                 stack
-                 current-frame))))))
 
-
-(int \")
+(int \{)
 (defn read
   "Reads a single item of JSON data from a java.io.Reader. Options are
   key-value pairs, valid options are:
@@ -381,7 +347,7 @@
               eof-error? true
               key-fn identity
               value-fn default-value-fn}} options]
-    (-read (PushbackReader. reader) eof-error? eof-value bigdec key-fn value-fn)))
+#_    (-read (PushbackReader. reader) eof-error? eof-value bigdec key-fn value-fn)))
 
 (def buffer (char-array 600001))
 
@@ -389,7 +355,8 @@
   "Reads one JSON value from input String. Options are the same as for
   read."
   ([^String string]
-   (-read (StringStream. 0 (.toCharArray string))#_(YoloJSONReader. (.toCharArray string) (StringReader. string)) true nil false identity default-value-fn))
+   (let [arr (.toCharArray string)]
+     (-read (StringStream. 0 (count arr) arr)#_(YoloJSONReader. (.toCharArray string) (StringReader. string)) true nil false identity default-value-fn)))
   ([string & options]
    (let [{:keys [eof-error? eof-value bigdec key-fn value-fn]
             :or {bigdec false
