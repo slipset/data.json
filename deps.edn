@@ -1,2 +1,7 @@
-{:paths ["src/main/clojure"]
- :deps {org.clojure/clojure {:mvn/version "1.8.0"}}}
+{:paths ["src/main/clojure" "src/test/clojure"]
+ :aliases {:profiling {:jvm-opts ["-Djdk.attach.allowAttachSelf=true"]}}
+ :deps {org.clojure/clojure {:mvn/version "1.8.0"}
+        com.clojure-goes-fast/clj-async-profiler {:mvn/version "0.5.0"}
+        criterium/criterium {:mvn/version "0.4.6"}
+        cheshire/cheshire {:mvn/version "5.10.0"}
+        metosin/jsonista {:mvn/version "0.3.1"}}}

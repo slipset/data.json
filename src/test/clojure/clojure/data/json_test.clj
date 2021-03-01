@@ -1,6 +1,6 @@
 (ns clojure.data.json-test
-  (:use clojure.test)
-  (:require [clojure.data.json :as json]))
+   (:require [clojure.data.json :as json]
+            [clojure.test :refer :all]))
 
 (deftest read-from-pushback-reader
   (let [s (java.io.PushbackReader. (java.io.StringReader. "42"))]
