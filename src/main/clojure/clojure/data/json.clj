@@ -7,13 +7,12 @@
 ;; remove this notice, or any other, from this software.
 
 (ns ^{:author "Stuart Sierra"
-      :doc "JavaScript Object Notation (JSON) parser/generator.
-  See http://www.json.org/"}
-  clojure.data.json
+      :doc "JavaScript Object Notation (JSON) parser/generator.\n  See http://www.json.org/"}
+ clojure.data.json
   (:refer-clojure :exclude (read))
   (:require [clojure.pprint :as pprint])
-  (:import (java.io PrintWriter PushbackReader StringWriter
-                    Writer StringReader EOFException)))
+  (:import [clojure.lang PersistentHashMap PersistentVector]
+           [java.io EOFException PrintWriter PushbackReader StringReader StringWriter Writer]))
 
 ;;; JSON READER
 
@@ -60,22 +59,21 @@
 (defn- read-array [^PushbackReader stream  bigdec? key-fn value-fn]
   ;; Expects to be called with the head of the stream AFTER the
   ;; opening bracket.
-  (loop [result (transient [])]
+  (loop [result (.asTransient (PersistentVector/EMPTY))]
     (let [c (.read stream)]
       (when (neg? c)
         (throw (EOFException. "JSON error (end-of-file inside array)")))
       (codepoint-case c
         :whitespace (recur result)
         \, (recur result)
-        \] (persistent! result)
+        \] (.persistent result)
         (do (.unread stream c)
-            (let [element (-read stream true nil bigdec? key-fn value-fn)]
-              (recur (conj! result element))))))))
+            (recur (.conj result (-read stream true nil bigdec? key-fn value-fn))))))))
 
 (defn- read-object [^PushbackReader stream  bigdec? key-fn value-fn]
   ;; Expects to be called with the head of the stream AFTER the
   ;; opening bracket.
-  (loop [key nil, pending? false, result (transient {})]
+  (loop [key nil, pending? false, result (.asTransient (PersistentHashMap/EMPTY))]
     (let [c (.read stream)]
       (when (neg? c)
         (throw (EOFException. "JSON error (end-of-file inside object)")))
@@ -91,7 +89,7 @@
         \} (if pending?
              (throw (Exception. "JSON error (missing entry in object)"))
              (if (nil? key)
-              (persistent! result)
+              (.persistent result)
               (throw (Exception. "JSON error (key missing value in object)"))))
 
         (do (.unread stream c)
@@ -105,7 +103,7 @@
                              out-value (value-fn out-key element)]
                          (if (= value-fn out-value)
                            result
-                           (assoc! result out-key out-value)))))))))))
+                           (.assoc result out-key out-value)))))))))))
 
 (defn- read-hex-char [^PushbackReader stream]
   ;; Expects to be called with the head of the stream AFTER the
