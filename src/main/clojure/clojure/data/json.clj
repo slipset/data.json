@@ -15,6 +15,7 @@
   (:import (java.io PrintWriter StringWriter
                     Reader Writer StringReader EOFException)
            [clojure.lang RT]
+           [clojure.data.json IBuffer JSONStringBuffer JSONReaderBuffer StackFrame]
            [java.util ArrayList LinkedList]))
 
 ;;; JSON READER
@@ -122,34 +123,67 @@
     (bigdec string)
     (Double/valueOf string)))
 
-(deftype StringStream [^{:unsynchronized-mutable true :tag long} i
+(defn- fast-string [^chars buffer ^long start]
+  (loop [j (int start)]
+    (if (= \" (aget buffer j))
+      (String. buffer start (unchecked-subtract-int j start))
+      (recur (unchecked-inc j)))))
+
+(deftype StringStream [^{:unsynchronized-mutable true :tag int} i
+                       ^{:unsynchronized-mutable true :tag int} j
                        ^long buff-size
                        ^chars buffer]
-  IFoo
-  (unread [_]
-    (set! i (unchecked-dec i)))
+  IBuffer
   (nextChar [_]
     (let [c (aget buffer i)]
-      (set! i (unchecked-inc i))
+      (set! i (unchecked-inc-int i))
       (int c)))
   (string [this]
     ;; Expects to be called with the head of the stream AT the
     ;; opening quotation mark.
-    (let [i' i]
-      (loop [j i]
-        (let [c (aget buffer j)]
-          (if (= \" c)
-            (do
-              (set! i (unchecked-inc j))
-              (String. buffer i' (unchecked-subtract j i')))
-            (if (= \\ c)
-              (do
-                (set! i j)
-                (slow-read-string this (String. buffer i' (unchecked-subtract j i'))))
-              (recur (unchecked-inc j))))))))
+    (let [s  "lol"#_(JSONStringBuffer/fastString buffer i)]
+      (set! i (unchecked-add-int 1 (unchecked-add-int i (.length s))))
+      s)
+    #_    (let [i' i]
+            (set! j (int i))
+            (loop []
+              (codepoint-case (int (RT/aget buffer j))
+                \" (do
+                     (set! i (unchecked-inc-int j))
+                     (String. buffer i' (unchecked-subtract-int j i')))
+                \\ (do
+                     (set! i (int j))
+                     (slow-read-string this (String. buffer i' (unchecked-subtract j i'))))
+                (do
+                  (set! j (unchecked-inc-int j))
+                  (recur ))))))
+
+  (keyString [this]
+    (loop []
+      (let [c (int (RT/aget buffer i))]
+        (if (> c (codepoint \ ))
+          (if (= c (codepoint \"))
+            (do (set! i (unchecked-inc-int i))
+                (let [s  "lol" #_(JSONStringBuffer/fastString buffer i)]
+                  (set! i (unchecked-add-int 1 (unchecked-add-int i (.length s))))
+                  (loop []
+                    (let [c (int (RT/aget buffer i))]
+                      (if (> c (codepoint \ ))
+                        (if (= c (codepoint \:))
+                          (do
+                            (set! i (unchecked-inc-int i))
+                            s)
+                          (throw (Exception. "Missing colon in object")))
+                        (do
+                          (set! i (unchecked-inc-int i))
+                          (recur)))))))
+            (throw (Exception. "Missing key in object")))
+          (do
+            (set! i (unchecked-inc-int i))
+            (recur))))))
 
   (number [this bigdec]
-    (set! i (unchecked-dec i))
+    (set! i (int (unchecked-dec i)))
     (loop [decimal? false]
       (let [c (.nextChar this)]
         (codepoint-case c
@@ -159,14 +193,18 @@
             (recur decimal?))
           (\e \E \.)
           (recur true)
-          (do (set! i (unchecked-dec i))
+          (do (set! i (int (unchecked-dec i)))
               9
               #_            (let [s (String. (java.util.Arrays/copyOf ^bytes buffer i))]
                               (if decimal?
                                 (read-decimal s bigdec)
                                 n(read-integer s)))))))))
 
-(defn- read-null [^StringStream stream]
+
+
+
+
+(defn- read-null [^IBuffer stream]
   (if (= (codepoint \u) (.nextChar stream))
     (if (= (codepoint \l) (.nextChar stream))
       (if (= (codepoint \l) (.nextChar stream))
@@ -175,7 +213,7 @@
       (throw (Exception. "Expected null, got nu")))
     (throw (Exception. "Expected null, got n"))))
 
-(defn- read-true [^StringStream stream]
+(defn- read-true [^IBuffer stream]
   (if (= (codepoint \r) (.nextChar stream))
     (if (= (codepoint \u) (.nextChar stream))
       (if (= (codepoint \e) (.nextChar stream))
@@ -184,7 +222,7 @@
       (throw (Exception. "Expected tr")))
     (throw (Exception. "Expected t"))))
 
-(defn- read-false [^StringStream stream]
+(defn- read-false [^IBuffer stream]
   (if (= (codepoint \a) (.nextChar stream))
     (if (= (codepoint \l) (.nextChar stream))
       (if (= (codepoint \s) (.nextChar stream))
@@ -196,103 +234,113 @@
     (throw (Exception. "Expected false, got f")))
   )
 
-(defn- read-key [^StringStream stream]
-  (loop []
-    (let [c (.nextChar stream)]
-      (if (> c (codepoint \ ))
-        (if (= c (codepoint \"))
-          (let [s (.string stream)]
-            (loop []
-              (let [c (.nextChar stream)]
-                (if (> c (codepoint \ ))
-                  (if (= c (codepoint \:))
-                    (do s)
-                    (throw (Exception. "Missing colon in object")))
-                  (recur)))))
-          (throw (Exception. "Missing key in object")))
-        (recur)))))
+
 
 (require '[clj-java-decompiler.core :refer [decompile]])
 
-(defprotocol IFrame
+#_(defprotocol IFrame
   (swap-key [_ k])
-  (get-key [_]))
+  (get-key [_])
 
-(deftype Frame [^boolean type value ^{:tag String
-                                      :unsynchronized-mutable true} key]
+  (set-key [_ k])
+
+  (set-value [_ v])
+
+  (set-type [_ t]))
+
+#_(deftype Frame [^{:tag boolean
+                  :unsynchronized-mutable true} type
+                ^{:tag Object
+                  :unsynchronized-mutable true} value
+                ^{:tag String
+                  :unsynchronized-mutable true} key]
   IFrame
   (swap-key [_ k]
     (let [old key]
       (set! key k)
       old))
   (get-key [_]
-    key))
+    key)
 
+  (set-key [_ k]
+    (set! key k))
 
-(defn -read [^StringStream stream eof-error? eof-value bigdec key-fn value-fn]
-  (loop [value nil stack (LinkedList.) current-frame nil]
-    (let [c (.nextChar stream)]
-      (if (> c (codepoint \ ))
-        (codepoint-case c
-          (\- \0 \1 \2 \3 \4 \5 \6 \7 \8 \9)
-          (let [n (.number stream bigdec)]
-            (if (not (.isEmpty stack))
-              (recur n stack current-frame)
-              n))
-          \n (do (read-null stream)
-                 (if (not (.isEmpty stack)) ;; \f
-                   (recur nil stack current-frame)
-                   nil))
-          \f (do (read-false stream)
-                 (if (not (.isEmpty stack)) ;; \f
-                   (recur false stack current-frame)
-                   false))
-          \t (do (read-true stream)
-                 (if (not (.isEmpty stack)) ;;\t
-                   (recur true stack current-frame)
-                   true))
-          \" (let [s (.string stream)]
-               (if (not (.isEmpty stack))
-                 (recur s stack current-frame)
-                 s))
-          \, (let [t (.type ^Frame current-frame)
-                   v (.value ^Frame current-frame)]
-               (if t
-                 (do
-                   (conj! v value)
-                   (recur nil
-                          stack
-                          current-frame))
-                 (let [k (.swap-key ^Frame current-frame (read-key stream))]
+  (set-value [_ v]
+    (set! value v))
 
-                   (assoc! v k value)
-                   (recur nil
-                          stack
-                          current-frame))))
-          ;; Read JSON arrays
-          \[ (let [f (Frame. true (transient []) nil)]
-               (.addFirst stack f)
-               (recur nil stack f))
-          \] (let [f ^Frame (.pollFirst stack) ;; \]
-                   v (.value ^Frame f)]
-               (conj! v value)
-               (if (.isEmpty stack)
-                 (persistent! v)
-                 (recur (persistent! v) stack (.getFirst stack))))
-          \{ (let [k ^String (read-key stream)
-                   f (Frame. false (transient {}) k)]
-               (.addFirst stack f)
-               (recur nil stack f))
-          \} (let [f ^Frame (.pollFirst stack)
-                   v (.value ^Frame f)]
-               (assoc! v (.get-key ^Frame f) value)
-               (if (.isEmpty stack)
-                 (persistent! v)
-                 (recur (persistent! v) stack (.getFirst stack))))
+  (set-type [_ t]
+    (set! type t)))
 
-          (throw (Exception.
-                  (str "JSON error (unexpected character): `" (char c) "`" (.string stream)))))
-        (recur value stack current-frame)))))
+(int \, )
+(defn -read [^JSONStringBuffer stream eof-error? eof-value bigdec key-fn value-fn]
+  (let [frame-pool (LinkedList.)]
+    (loop [value nil stack (LinkedList.) current-frame nil]
+      (let [c (.nextChar stream)]
+        (if (> c (codepoint \ ))
+          (codepoint-case c
+            (\- \0 \1 \2 \3 \4 \5 \6 \7 \8 \9)
+            (let [n (.number stream bigdec)]
+              (if (not (.isEmpty stack))
+                (recur n stack current-frame)
+                n))
+            \n (do (read-null stream)
+                   (if (not (.isEmpty stack)) ;; \f
+                     (recur nil stack current-frame)
+                     nil))
+            \f (do (read-false stream)
+                   (if (not (.isEmpty stack)) ;; \f
+                     (recur false stack current-frame)
+                     false))
+            \t (do (read-true stream)
+                   (if (not (.isEmpty stack)) ;;\t
+                     (recur true stack current-frame)
+                     true))
+            \" (if (.isEmpty stack)
+                 (.string stream)
+                 (recur (.string stream) stack current-frame))
+            \, (let [v (.value ^StackFrame current-frame)]
+                 (if (.type ^StackFrame current-frame)
+                   (do
+                     (conj! v value)
+                     (recur nil
+                            stack
+                            current-frame))
+                   (let [k (.swapKey ^StackFrame current-frame (.keyString stream))]
+
+                     (assoc! v k value)
+                     (recur nil
+                            stack
+                            current-frame))))
+            ;; Read JSON arrays
+            \[ (let [f (if-let [f ^StackFrame (.pollFirst frame-pool)]
+                         (.reset f (transient []))
+                         (StackFrame. (transient [])))]
+                 (.addFirst stack f)
+                 (recur nil stack f))
+            \] (let [f ^StackFrame (.pollFirst stack) ;; \]
+                     v (.value ^StackFrame f)]
+                 (.addFirst frame-pool f)
+                 (conj! v value)
+                 (if (.isEmpty stack)
+                   (persistent! v)
+                   (recur (persistent! v) stack (.getFirst stack))))
+            \{ (let [k ^String (.keyString stream)
+                     f (if-let [f ^StackFrame (.pollFirst frame-pool)]
+                         (.reset f (transient {}) k)
+                         (StackFrame. (transient {}) k))]
+                 (.addFirst stack f)
+                 (recur nil stack f))
+            \} (let [f ^StackFrame (.pollFirst stack)
+                     v (.value ^StackFrame f)]
+                 (.addFirst frame-pool f)
+                 (assoc! v (.key ^StackFrame f) value)
+                 (if (.isEmpty stack)
+                   (persistent! v)
+                   (recur (persistent! v) stack (.getFirst stack))))
+
+            (throw (Exception.
+                    (str "JSON error (unexpected character): `" (char c) "`" (.string stream)))))
+          (recur value stack current-frame))))))
 
 #_(let [f ^Frame (.pollFirst stack)
                      v (.value ^Frame f)]
@@ -325,7 +373,6 @@
         Default is false.
 
      :key-fn function
-
         Single-argument function called on JSON property names; return
         value will replace the property names in the output. Default
         is clojure.core/identity, use clojure.core/keyword to get
@@ -355,8 +402,8 @@
   "Reads one JSON value from input String. Options are the same as for
   read."
   ([^String string]
-   (let [arr (.toCharArray string)]
-     (-read (StringStream. 0 (count arr) arr)#_(YoloJSONReader. (.toCharArray string) (StringReader. string)) true nil false identity default-value-fn)))
+   (let [#_#_arr (.toCharArray string)]
+     (-read (JSONStringBuffer. string)#_(YoloJSONReader. (.toCharArray string) (StringReader. string)) true nil false identity default-value-fn)))
   ([string & options]
    (let [{:keys [eof-error? eof-value bigdec key-fn value-fn]
             :or {bigdec false
