@@ -17,7 +17,6 @@
 
 ;;; JSON READER
 
-(def ^{:dynamic true :private true} *bigdec*)
 (def ^{:dynamic true :private true} *key-fn*)
 (def ^{:dynamic true :private true} *value-fn*)
 
@@ -56,7 +55,7 @@
      ~@(when (odd? (count clauses))
          [(last clauses)])))
 
-(defn- read-array [^PushbackReader stream]
+(defn- read-array [^PushbackReader stream  bigdec? key-fn value-fn]
   ;; Expects to be called with the head of the stream AFTER the
   ;; opening bracket.
   (loop [result (transient [])]
@@ -68,10 +67,10 @@
         \, (recur result)
         \] (persistent! result)
         (do (.unread stream c)
-            (let [element (-read stream true nil)]
+            (let [element (-read stream true nil bigdec? key-fn value-fn)]
               (recur (conj! result element))))))))
 
-(defn- read-object [^PushbackReader stream]
+(defn- read-object [^PushbackReader stream  bigdec? key-fn value-fn]
   ;; Expects to be called with the head of the stream AFTER the
   ;; opening bracket.
   (loop [key nil, pending? false, result (transient {})]
@@ -94,15 +93,15 @@
               (throw (Exception. "JSON error (key missing value in object)"))))
 
         (do (.unread stream c)
-            (let [element (-read stream true nil)]
+            (let [element (-read stream true nil bigdec? key-fn value-fn)]
               (if (nil? key)
                 (if (string? element)
                   (recur element false result)
                   (throw (Exception. "JSON error (non-string key in object)")))
                 (recur nil false
-                       (let [out-key (*key-fn* key)
-                             out-value (*value-fn* out-key element)]
-                         (if (= *value-fn* out-value)
+                       (let [out-key (key-fn key)
+                             out-value (value-fn out-key element)]
+                         (if (= value-fn out-value)
                            result
                            (assoc! result out-key out-value)))))))))))
 
@@ -156,12 +155,12 @@
              (catch NumberFormatException e nil))
         (bigint string))))
 
-(defn- read-decimal [^String string]
-  (if *bigdec*
+(defn- read-decimal [^String string bigdec?]
+  (if bigdec?
     (bigdec string)
     (Double/valueOf string)))
 
-(defn- read-number [^PushbackReader stream]
+(defn- read-number [^PushbackReader stream bigdec?]
   (let [buffer (StringBuilder.)
         decimal? (loop [decimal? false]
                    (let [c (.read stream)]
@@ -175,11 +174,11 @@
                        (do (.unread stream c)
                            decimal?))))]
     (if decimal?
-      (read-decimal (str buffer))
+      (read-decimal (str buffer) bigdec?)
       (read-integer (str buffer)))))
 
 (defn- -read
-  [^PushbackReader stream eof-error? eof-value]
+  [^PushbackReader stream eof-error? eof-value bigdec? key-fn value-fn]
   (loop []
     (let [c (.read stream)]
       (if (neg? c) ;; Handle end-of-stream
@@ -193,7 +192,7 @@
           ;; Read numbers
           (\- \0 \1 \2 \3 \4 \5 \6 \7 \8 \9)
           (do (.unread stream c)
-              (read-number stream))
+              (read-number stream bigdec?))
 
           ;; Read strings
           \" (read-quoted-string stream)
@@ -221,10 +220,10 @@
                (throw (Exception. "JSON error (expected false)")))
 
           ;; Read JSON objects
-          \{ (read-object stream)
+          \{ (read-object stream bigdec? key-fn value-fn)
 
           ;; Read JSON arrays
-          \[ (read-array stream)
+          \[ (read-array stream bigdec? key-fn value-fn)
 
           (throw (Exception.
                   (str "JSON error (unexpected character): " (char c)))))))))
@@ -270,16 +269,18 @@
               eof-error? true
               key-fn identity
               value-fn default-value-fn}} options]
-    (binding [*bigdec* bigdec
-              *key-fn* key-fn
-              *value-fn* value-fn]
-      (-read (PushbackReader. reader) eof-error? eof-value))))
+    (-read (PushbackReader. reader) eof-error? eof-value bigdec key-fn value-fn)))
 
 (defn read-str
   "Reads one JSON value from input String. Options are the same as for
   read."
   [string & options]
-  (apply read (StringReader. string) options))
+  (let [{:keys [eof-error? eof-value bigdec key-fn value-fn]
+         :or {bigdec false
+              eof-error? true
+              key-fn identity
+              value-fn default-value-fn}} options]
+    (-read (PushbackReader. (StringReader. string)) eof-error? eof-value bigdec key-fn value-fn)))
 
 ;;; JSON WRITER
 
