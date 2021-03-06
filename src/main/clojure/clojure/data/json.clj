@@ -20,6 +20,8 @@
 (def ^{:dynamic true :private true} *key-fn*)
 (def ^{:dynamic true :private true} *value-fn*)
 
+(def ^{:const true :private true :tag int} buffer-size 64)
+
 (defn- default-write-key-fn
   [x]
   (cond (instance? clojure.lang.Named x)
@@ -133,10 +135,8 @@
       \t \tab
       \u (read-hex-char stream))))
 
-(defn- read-quoted-string [^PushbackReader stream]
-  ;; Expects to be called with the head of the stream AFTER the
-  ;; opening quotation mark.
-  (let [buffer (StringBuilder.)]
+(defn- slow-read-string [^PushbackReader stream ^String already-read]
+  (let [buffer (StringBuilder. already-read)]
     (loop []
       (let [c (.read stream)]
         (when (neg? c)
@@ -147,6 +147,29 @@
                  (recur))
           (do (.append buffer (char c))
               (recur)))))))
+
+(defn- read-quoted-string [^PushbackReader stream]
+  ;; Expects to be called with the head of the stream AFTER the
+  ;; opening quotation mark.
+  (let [buffer ^chars (char-array buffer-size)
+        read (.read stream buffer 0 buffer-size)
+        one-less-than-buffer-size (dec buffer-size)]
+    (when (neg? read)
+      (throw (EOFException. "JSON error (end-of-file inside string)")))
+    (loop [i (int 0)]
+      (let [c (int (aget buffer i))]
+        (codepoint-case c
+          \" (let [off (unchecked-inc-int i)
+                   len (unchecked-subtract-int read off)]
+               (.unread stream buffer off len)
+               (String. buffer 0 i))
+          \\ (let [off i
+                   len (unchecked-subtract-int read off)]
+               (.unread stream buffer off len)
+               (slow-read-string stream (String. buffer 0 i)))
+          (if (= i one-less-than-buffer-size)
+            (slow-read-string stream (String. buffer 0 i))
+            (recur (unchecked-inc-int i))))))))
 
 (defn- read-integer [^String string]
   (if (< (count string) 18)  ; definitely fits in a Long
@@ -280,7 +303,7 @@
               eof-error? true
               key-fn identity
               value-fn default-value-fn}} options]
-    (-read (PushbackReader. (StringReader. string)) eof-error? eof-value bigdec key-fn value-fn)))
+    (-read (PushbackReader. (StringReader. string) buffer-size) eof-error? eof-value bigdec key-fn value-fn)))
 
 ;;; JSON WRITER
 

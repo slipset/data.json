@@ -33,9 +33,19 @@
   (doseq [size ["10b" "100b" "1k" "10k" "100k"]]
     (do-bench size)))
 
+(defn bench-data-json []
+  (doseq [size ["10b" "100b" "1k" "10k" "100k"]]
+    (let [data (json-data size)]
+      (quick-bench (json/read-str data)))))
+
 (defn profile-all-sizes []
   (doseq [size ["10b" "100b" "1k" "10k" "100k"]]
     (let [json (json-data size)]
       (profiling 10000 (json/read-str json))
       (Thread/sleep 1000))))
 
+(defn bla []
+  (.read
+    (JsonIterator/parse "{\"loladfadsfadfalkjkjalksdfadsfadsfadfakljlkjlkjasdfadfadfadf\":\"bla\"}")))
+
+(bla)
