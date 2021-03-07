@@ -11,7 +11,7 @@
  clojure.data.json
   (:refer-clojure :exclude (read))
   (:require [clojure.pprint :as pprint])
-  (:import [clojure.lang PersistentHashMap PersistentVector]
+  (:import [clojure.lang IFn PersistentHashMap PersistentVector]
            [java.io EOFException PrintWriter PushbackReader StringReader StringWriter Writer]))
 
 ;;; JSON READER
@@ -89,21 +89,22 @@
         \} (if pending?
              (throw (Exception. "JSON error (missing entry in object)"))
              (if (nil? key)
-              (.persistent result)
-              (throw (Exception. "JSON error (key missing value in object)"))))
+               (.persistent result)
+               (throw (Exception. "JSON error (key missing value in object)"))))
 
         (do (.unread stream c)
             (let [element (-read stream true nil bigdec? key-fn value-fn)]
-              (if (nil? key)
-                (if (string? element)
-                  (recur element false result)
-                  (throw (Exception. "JSON error (non-string key in object)")))
+              (if key
                 (recur nil false
                        (let [out-key (key-fn key)
                              out-value (value-fn out-key element)]
-                         (if (= value-fn out-value)
+                         (if (and (instance? IFn out-value)
+                                  (= value-fn out-value))
                            result
-                           (.assoc result out-key out-value)))))))))))
+                           (.assoc result out-key out-value))))
+                (if (instance? String element)
+                  (recur element false result)
+                  (throw (Exception. "JSON error (non-string key in object)"))))))))))
 
 (defn- read-hex-char [^PushbackReader stream]
   ;; Expects to be called with the head of the stream AFTER the
