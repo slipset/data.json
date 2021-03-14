@@ -27,7 +27,7 @@
                    :eof-error? eof-error?
                    :eof-value eof-value)
          java.io.Reader
-         (read input
+         #_(read input
                :key-fn key-fn
                :eof-error? eof-error?
                :eof-value eof-value)))))
