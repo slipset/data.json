@@ -15,6 +15,82 @@
   (:import (java.io PrintWriter PushbackReader StringWriter
                     Writer StringReader EOFException)))
 
+(deftype JSONObject [^java.util.Map m]
+
+  clojure.lang.Associative
+  (containsKey [_ k]
+    (.containsKey m k))
+  (entryAt [_ k]
+    (.get m k))
+
+  clojure.lang.IFn
+  (invoke [_ k]
+    (.get m k))
+  (invoke [_ k not-found]
+    (.getOrDefault m k not-found))
+
+  clojure.lang.IKVReduce
+  (kvreduce [_ f init]
+    (reduce-kv f init (into {} m)))
+
+   clojure.lang.ILookup
+   (valAt [_ k]
+     (.get m k))
+   (valAt [_ k not-found]
+     ;; This will not behave properly if not-found is a Delay,
+     ;; but that's a pretty obscure edge case.
+     (.getOrDefault m k not-found))
+
+   clojure.lang.IMapIterable
+   (keyIterator [_]
+     (.keySet m))
+   (valIterator [_]
+     (.values m))
+
+   clojure.lang.IPersistentCollection
+   (count [_]
+     (.size m))
+   (empty [_]
+     (.isEmpty m))
+   (cons [_ o]
+     (cons (into {} m) o))
+   (equiv [_ o]
+     (.equals m o))
+
+   clojure.lang.IPersistentMap
+   (assoc [_ key val]
+     (assoc (into {} m) key val))
+   (without [_ key]
+     (dissoc (into {} m) key))
+
+   clojure.lang.Seqable
+   (seq [_]
+     ;; Using the higher-arity form of map prevents chunking.
+     (map (fn [^java.util.Map$Entry entry]
+            [(.getKey entry) (.getValue entry)]) (.entrySet m)))
+
+   java.lang.Iterable
+   (iterator [_]
+     (.entrySet m))
+
+   java.lang.Object
+   (toString [this]
+     (.toString m)))
+
+(deftype JSONList [^java.util.List l]
+  clojure.lang.IEditableCollection
+
+  clojure.lang.IPersistentVector
+  
+
+  clojure.lang.IFn
+  (invoke [_ i]
+    (.get l i))
+
+
+  )
+
+
 ;;; JSON READER
 
 
@@ -73,7 +149,7 @@
   ;; opening bracket.
   (let [key-fn (:key-fn options)
         value-fn (:value-fn options)]
-    (loop [key nil, pending? false, result (transient {})]
+    (loop [key nil, pending? false, result (java.util.HashMap.)]
       (let [c (.read stream)]
         (when (neg? c)
           (throw (EOFException. "JSON error (end-of-file inside object)")))
@@ -89,7 +165,7 @@
           \} (if pending?
                (throw (Exception. "JSON error (missing entry in object)"))
                (if (nil? key)
-                 (persistent! result)
+                 (->JSONObject result)
                  (throw (Exception. "JSON error (key missing value in object)"))))
 
           (do (.unread stream c)
@@ -103,7 +179,9 @@
                                out-value (value-fn out-key element)]
                            (if (= value-fn out-value)
                              result
-                             (assoc! result out-key out-value))))))))))))
+                             (do
+                               (.put result out-key out-value)
+                               result))))))))))))
 
 (defn- read-hex-char [^PushbackReader stream]
   ;; Expects to be called with the head of the stream AFTER the
